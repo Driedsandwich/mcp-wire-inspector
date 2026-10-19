@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MCP wire inspector example</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+      body { max-width: 960px; margin: 40px auto; padding: 0 20px; }
+      h1 { font-size: 28px; }
+      form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 24px 0 8px; }
+      label { display: grid; gap: 4px; flex: 1; }
+      input, button { font: inherit; padding: 8px; }
+      input { min-width: 220px; }
+      #status { min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h1>MCP wire inspector</h1>
+    <p>Connect to a Streamable HTTP MCP server to inspect its JSON-RPC messages.</p>
+    <p>The server must allow this page's Origin. Elicitation requests in this example are cancelled automatically.</p>
+    <form id="connection">
+      <label>Server URL <input id="url" type="url" required value="http://127.0.0.1:3001/mcp" /></label>
+      <button id="connect" type="submit">Connect and list tools</button>
+      <button id="disconnect" type="button" disabled>Disconnect</button>
+    </form>
+    <p id="status" role="status">Disconnected.</p>
+    <div id="inspector"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
