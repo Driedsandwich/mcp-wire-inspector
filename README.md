@@ -55,7 +55,11 @@ Creates a bounded ring buffer. `limit` must be a positive safe integer. Methods:
 
 Each entry contains `seq`, `direction` (`out` or `in`), `at` (milliseconds since Unix epoch), a deep-copied `message`, and `kind` (`request`, `response`, `notification`, or JSON-RPC `error`). `method` and `id` appear when available. Paired requests and responses have `pairSeq` and `latencyMs`; responses inherit their request's method for filtering. Numeric and string IDs are distinct, and requests in opposite directions can share an ID.
 
-Default redaction recursively masks values under keys containing `authorization`, `token`, `apiKey`, or `password`, ignoring case, spaces, underscores and hyphens. The optional `redact(message)` hook receives an already default-redacted, detached copy and returns the message to store. Exported ID and method metadata follow this redacted copy; original IDs are used privately only for bounded request pairing. It can mask additional fields without mutating traffic:
+Default redaction recursively masks values under keys containing `authorization`, `token`, `apiKey`, `password`, `cookie` (including `set-cookie`), `secret`, `credential` (including `credentials`), `passwd`, `private key`, or `bearer`, ignoring case, spaces, underscores and hyphens. MCP's `progressToken` and `maxTokens` fields are exempt from key-based masking so progress correlation and sampling limits remain visible. Secret-named header pairs are also masked: `{ name: "Authorization", value: "..." }` and `["authorization", "..."]` retain their names and replace their values.
+
+String masking is best-effort: it replaces Bearer tokens, JWT-shaped strings starting with `eyJ` and containing three base64url parts, Authorization/Cookie/Set-Cookie header-line values, and key-shaped strings starting with `sk-`, `ghp_`, `github_pat_` (at least eight following letters, digits, underscores or hyphens), or `AKIA` (16 following uppercase letters or digits). Header names, the Bearer scheme, and surrounding text outside the matched value are kept. These rules apply to nested strings, including tool output, errors and log data, before storage, display or export.
+
+The optional `redact(message)` hook receives an already default-redacted, detached copy and returns the message to store. Exported ID and method metadata follow this redacted copy; original IDs are used privately only for bounded request pairing. It can mask additional fields without mutating traffic:
 
 ```ts
 const recorder = createRecorder({
@@ -76,6 +80,8 @@ The summary covers retained entries only. Tool count is the size of the latest l
 ### `mountInspector(element, recorder, { title? } = {})`
 
 Appends a panel and returns `{ unmount }`. The panel shows the summary, method substring and kind filters, expandable pretty-printed JSON, pairing and latency, error and elicitation flags, per-entry copy, and JSON download of all retained entries. It uses native buttons, labeled controls, `aria-expanded`, and a live status region. No fonts or network assets are fetched. Clipboard access requires browser support and a secure context; copy/export failures appear in the panel.
+
+Traffic updates coalesce into one queued microtask render per burst, keeping panel rendering off the synchronous send path. The initial render and filter controls remain immediate; recorder subscriptions still notify synchronously.
 
 `unmount()` unsubscribes and removes the panel; it preserves host content, recorder data, and transport state. Styles are inserted once per document and shared by mounted panels. The CSS prefix is `mcp-wire-inspector`. Override these custom properties on `.mcp-wire-inspector` (with your stylesheet after the injected style) or directly on the panel:
 
@@ -113,8 +119,9 @@ The MCP server must allow the page's Origin through CORS, including required MCP
 ## Limitations
 
 - Records JSON-RPC messages, not raw HTTP headers, authentication metadata, SSE framing, or network-level failures. An outgoing record is a send attempt, not proof of delivery. JSON-RPC batch arrays are outside the SDK `Transport` message contract.
-- Redaction is best-effort. Secrets in free text or under unrecognized keys can remain; broadly matched key names can also hide harmless values. Review exports before sharing. Custom hooks are synchronous.
+- Redaction is best-effort. Known secret keys, header pairs, Bearer/JWT strings, header lines and common key prefixes are masked as described above, with `progressToken` and `maxTokens` exempt from key-based masking. Unrecognized, encoded or fragmented secrets can remain, and pattern matches can hide harmless values. Review exports before sharing. Custom hooks are synchronous and can change the default-redacted copy.
 - History and summaries are in memory and limited to the retained window. Reusing an outstanding ID in the same direction is ambiguous; pairing uses the latest unmatched retained request. Inspecting the same transport twice concurrently is rejected.
+- Retention is bounded by entry count, not message size. Large messages (for example base64 blobs) are kept in full until they leave the window, subject to redaction.
 - The DOM panel rebuilds its bounded list on updates; it is intended for debugging and demonstrations rather than high-throughput telemetry. A restrictive Content Security Policy may block injected inline styles.
 - Tests use SDK `1.32.1`. The entire peer version range and every transport implementation have not been individually tested.
 

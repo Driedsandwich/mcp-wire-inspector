@@ -7,6 +7,20 @@ const message: JSONRPCMessage = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
 const makeTransport = (): Transport => ({ start: async () => {}, close: async () => {}, send: vi.fn(async () => {}) });
 
 describe('transport instrumentation', () => {
+  it('exposes an unset receive handler and preserves it when cleared and restored', () => {
+    const transport = makeTransport();
+    const { recorder, restore } = instrumentTransport(transport);
+    expect(transport.onmessage).toBeUndefined();
+    transport.onmessage = vi.fn();
+    expect(transport.onmessage).toBeTypeOf('function');
+    transport.onmessage = undefined;
+    expect(transport.onmessage).toBeUndefined();
+    expect(recorder.entries()).toEqual([]);
+    restore();
+    expect(transport.onmessage).toBeUndefined();
+    expect(Object.hasOwn(transport, 'onmessage')).toBe(false);
+  });
+
   it('captures a receive handler assigned after wrapping, preserving arguments and this', async () => {
     const transport = makeTransport();
     const send = transport.send;
@@ -79,11 +93,17 @@ describe('transport instrumentation', () => {
     }
     const transport = new ForwardingTransport();
     const { recorder, restore } = instrumentTransport(transport);
+    expect(transport.onmessage).toBeUndefined();
+    expect(underlying).toBeUndefined();
     const handler = vi.fn();
     transport.onmessage = handler;
     underlying!(message);
     expect(recorder.entries()).toHaveLength(1);
     expect(handler).toHaveBeenCalledWith(message);
+    transport.onmessage = undefined;
+    expect(transport.onmessage).toBeUndefined();
+    expect(underlying).toBeUndefined();
+    transport.onmessage = handler;
     restore();
     expect(Object.hasOwn(transport, 'onmessage')).toBe(false);
     expect(underlying).toBe(handler);

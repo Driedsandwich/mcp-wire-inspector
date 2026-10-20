@@ -31,12 +31,35 @@ export function classify(message: JSONRPCMessage): EntryKind {
   return 'error' in message ? 'error' : 'response';
 }
 
+function isSecretKey(key: string): boolean {
+  const normalized = key.replace(/[-_\s]/g, '').toLowerCase();
+  if (normalized === 'progresstoken' || normalized === 'maxtokens') return false;
+  return /authorization|token|apikey|password|cookie|secret|credential|passwd|privatekey|bearer/.test(normalized);
+}
+
+function redactText(text: string): string {
+  // Mask whole header values before narrower patterns to avoid leaving token fragments.
+  return text
+    .replace(/(\b(?:authorization|(?:set-)?cookie)[ \t]*:[ \t]*)(Bearer[ \t]+)?[^\r\n]+/gi, '$1$2[REDACTED]')
+    .replace(/(\bBearer[ \t]+)[A-Za-z0-9_~+/-](?:[A-Za-z0-9._~+/-]*[A-Za-z0-9_~+/-])?=*/gi, '$1[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])/g, '[REDACTED]')
+    .replace(/\b(?:(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})(?![A-Za-z0-9_-])/g, '[REDACTED]');
+}
+
 function redactSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (typeof value === 'string') return redactText(value);
+  if (Array.isArray(value)) {
+    if (value.length === 2 && typeof value[0] === 'string' && isSecretKey(value[0])) {
+      return [redactText(value[0]), '[REDACTED]'];
+    }
+    return value.map(redactSecrets);
+  }
   if (value && typeof value === 'object') {
+    const header = value as Record<string, unknown>;
+    const secretHeader = typeof header.name === 'string' && isSecretKey(header.name);
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [
       key,
-      /authorization|token|apikey|password/i.test(key.replace(/[-_\s]/g, ''))
+      isSecretKey(key) || (secretHeader && key === 'value')
         ? '[REDACTED]' : redactSecrets(item),
     ]));
   }

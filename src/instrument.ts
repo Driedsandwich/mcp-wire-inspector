@@ -37,14 +37,14 @@ export function instrumentTransport(transport: Transport, options?: RecorderOpti
     return originalSend.apply(this, args);
   };
   const receiving = new WeakSet<object>();
-  const wrapReceive = (callback: Transport['onmessage']): NonNullable<Transport['onmessage']> => function (this: Transport, ...args) {
+  const wrapReceive = (callback: Transport['onmessage']): Transport['onmessage'] => callback === undefined ? undefined : function (this: Transport, ...args) {
     // Protocol.connect chains its handler to the previously installed callback.
     // Each assignment captures that callback, and a chain records a message once.
     const nested = receiving.has(args[0]);
     if (!nested) receiving.add(args[0]);
     try {
       if (!nested) record('in', args[0]);
-      callback?.apply(this, args);
+      callback.apply(this, args);
     } finally {
       if (!nested) receiving.delete(args[0]);
     }
@@ -52,7 +52,7 @@ export function instrumentTransport(transport: Transport, options?: RecorderOpti
   let wrappedReceive = wrapReceive(handler);
   const getter = () => wrappedReceive;
   // Some SDK transports forward this property into an underlying transport.
-  // Install the current wrapper there too, as well as exposing it to direct callbacks.
+  // Preserve an unset hook there too so the transport can queue early messages.
   const forwardReceive = () => receiveAccessor?.set?.call(transport, wrappedReceive);
   Object.defineProperty(transport, 'onmessage', {
     configurable: true,

@@ -262,7 +262,15 @@ export function mountInspector(
   methodInput.addEventListener('input', render);
   kindSelect.addEventListener('change', render);
   exportButton.addEventListener('click', exportAll);
-  const unsubscribe = recorder.subscribe(render);
+  let renderScheduled = false;
+  const unsubscribe = recorder.subscribe(() => {
+    if (renderScheduled || !mounted) return;
+    renderScheduled = true;
+    queueMicrotask(() => {
+      renderScheduled = false;
+      render();
+    });
+  });
   render();
   return {
     unmount() {

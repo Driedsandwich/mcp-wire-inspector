@@ -82,6 +82,93 @@ describe('recorder', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    'authorization', 'token', 'accessToken', 'refresh_token', 'apiToken', 'api-key', 'password',
+    'Cookie', 'Set-Cookie', 'client_secret', 'credential', 'credentials', 'passwd', 'private_key', 'private key', 'bearer',
+  ])('masks secret values under the %s key', (key) => {
+    const recorder = createRecorder();
+    const source = { jsonrpc: '2.0' as const, id: 1, result: { nested: [{ [key]: 'fixture-sensitive-value' }] } };
+    recorder.record('in', source);
+    expect(recorder.entries()[0]?.message).toEqual({
+      jsonrpc: '2.0', id: 1, result: { nested: [{ [key]: '[REDACTED]' }] },
+    });
+    expect(JSON.stringify(recorder.toJSON())).not.toContain('fixture-sensitive-value');
+    expect(source.result.nested[0]?.[key]).toBe('fixture-sensitive-value');
+  });
+
+  it('masks secret header pairs while preserving ordinary pairs and labels', () => {
+    const recorder = createRecorder();
+    recorder.record('in', { jsonrpc: '2.0', id: 1, result: { headers: [
+      { name: 'Authorization', value: 'fixture-auth', extra: 'kept' },
+      { name: 'Set-Cookie', value: 'session=fixture-cookie' },
+      ['authorization', 'Bearer fixture-token'],
+      ['cookie', 'session=fixture-cookie'],
+      { name: 'Content-Type', value: 'application/json' },
+      ['Accept', 'application/json'],
+      ['progressToken', 'visible'],
+    ] } });
+    expect(recorder.toJSON()[0]?.message).toEqual({ jsonrpc: '2.0', id: 1, result: { headers: [
+      { name: 'Authorization', value: '[REDACTED]', extra: 'kept' },
+      { name: 'Set-Cookie', value: '[REDACTED]' },
+      ['authorization', '[REDACTED]'],
+      ['cookie', '[REDACTED]'],
+      { name: 'Content-Type', value: 'application/json' },
+      ['Accept', 'application/json'],
+      ['progressToken', 'visible'],
+    ] } });
+  });
+
+  it.each([
+    ['before Bearer fixture.access-token after', 'before Bearer [REDACTED] after'],
+    ['before eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlIn0.signature_- after', 'before [REDACTED] after'],
+    ['before\nAuthorization: Bearer fixture-token\nafter', 'before\nAuthorization: Bearer [REDACTED]\nafter'],
+    ['before\nAuthorization: Basic Zml4dHVyZQ==\r\nafter', 'before\nAuthorization: [REDACTED]\r\nafter'],
+    ['before\nCookie: session=fixture; other=value\nafter', 'before\nCookie: [REDACTED]\nafter'],
+    ['before\nSet-Cookie: session=fixture; HttpOnly\nafter', 'before\nSet-Cookie: [REDACTED]\nafter'],
+    ['before sk-proj-fixture123456 after', 'before [REDACTED] after'],
+    ['before ghp_fixture123456 after', 'before [REDACTED] after'],
+    ['before github_pat_fixture123456 after', 'before [REDACTED] after'],
+    ['before AKIA0123456789ABCDEF after', 'before [REDACTED] after'],
+    ['Ordinary text: tokens=100; sky-blue; ghp_short; AKIA123; v1.2.3.', 'Ordinary text: tokens=100; sky-blue; ghp_short; AKIA123; v1.2.3.'],
+  ])('masks known string secrets and preserves surrounding text: %s', (text, masked) => {
+    const recorder = createRecorder();
+    recorder.record('in', { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text }] } });
+    recorder.record('in', { jsonrpc: '2.0', id: 2, error: { code: -32603, message: text, data: { log: text } } });
+    expect(recorder.entries()[0]?.message).toMatchObject({ result: { content: [{ text: masked }] } });
+    expect(recorder.toJSON()[1]?.message).toMatchObject({ error: { message: masked, data: { log: masked } } });
+  });
+
+  it('masks overlapping string patterns fully before custom hooks and export', () => {
+    const jwt = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlIn0.signature_-';
+    const text = `Authorization: Bearer ${jwt}\nCookie: session=sk-proj-fixture123456; other=ghp_fixture123456\nBearer github_pat_fixture123456.`;
+    const hook = vi.fn((message: JSONRPCMessage) => message);
+    const recorder = createRecorder({ redact: hook });
+    recorder.record('in', { jsonrpc: '2.0', id: 1, result: { text } });
+    expect(hook.mock.calls[0]?.[0]).toMatchObject({ result: {
+      text: 'Authorization: Bearer [REDACTED]\nCookie: [REDACTED]\nBearer [REDACTED].',
+    } });
+    const exported = JSON.stringify(recorder);
+    for (const secret of [jwt, 'fixture123456', 'signature_-', 'session=']) expect(exported).not.toContain(secret);
+  });
+
+  it('preserves MCP progress tokens and sampling limits while masking real token keys', () => {
+    const recorder = createRecorder();
+    recorder.record('out', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      _meta: { progressToken: 'progress-123' }, accessToken: 'fixture-access',
+    } });
+    recorder.record('in', { jsonrpc: '2.0', method: 'notifications/progress', params: {
+      progressToken: 'progress-123', progress: 1, total: 2, refresh_token: 'fixture-refresh',
+    } });
+    recorder.record('in', { jsonrpc: '2.0', id: 2, method: 'sampling/createMessage', params: {
+      maxTokens: 100, token: 'fixture-token', apiToken: 'fixture-api',
+    } });
+    expect(recorder.entries().map(entry => 'params' in entry.message && entry.message.params)).toEqual([
+      { _meta: { progressToken: 'progress-123' }, accessToken: '[REDACTED]' },
+      { progressToken: 'progress-123', progress: 1, total: 2, refresh_token: '[REDACTED]' },
+      { maxTokens: 100, token: '[REDACTED]', apiToken: '[REDACTED]' },
+    ]);
+  });
+
   it('redacts exported metadata and pairs distinct original IDs even when masked to the same value', () => {
     const recorder = createRecorder({ redact(message) {
       if ('id' in message) message.id = '[MASKED]';

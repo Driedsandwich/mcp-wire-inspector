@@ -7,7 +7,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { instrumentTransport } from '../src/instrument.js';
 import type { WireEntry } from '../src/recorder.js';
@@ -52,6 +52,41 @@ function expectPaired(request: WireEntry, entries: WireEntry[]) {
 }
 
 describe('official SDK integration', () => {
+  it('queues a message received before the instrumented server connects and records it once', async () => {
+    const server = createTestServer();
+    const client = new Client({ name: 'early-message-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const { recorder, restore } = instrumentTransport(serverTransport);
+    const earlyMessage = {
+      jsonrpc: '2.0' as const,
+      method: 'notifications/early-message',
+      params: { text: 'Queued before connect' },
+    };
+    const received = vi.fn();
+    server.server.setNotificationHandler(z.object({
+      jsonrpc: z.literal('2.0'),
+      method: z.literal('notifications/early-message'),
+      params: z.object({ text: z.string() }),
+    }), received);
+
+    try {
+      await clientTransport.send(earlyMessage);
+      expect(received).not.toHaveBeenCalled();
+      expect(recorder.entries()).toEqual([]);
+      await server.connect(serverTransport);
+      await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+      expect(received.mock.calls[0]?.[0]).toEqual(earlyMessage);
+      await client.connect(clientTransport, { timeout: 5000 });
+      const earlyEntries = recorder.entries().filter(entry => entry.method === earlyMessage.method);
+      expect(earlyEntries).toHaveLength(1);
+      expect(earlyEntries[0]).toMatchObject({ direction: 'in', message: earlyMessage });
+      expect(received).toHaveBeenCalledOnce();
+    } finally {
+      await Promise.allSettled([client.close(), server.close()]);
+      restore();
+    }
+  });
+
   it('records a real Streamable HTTP session and bidirectional elicitation', async () => {
     const server = createTestServer();
     const serverTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });

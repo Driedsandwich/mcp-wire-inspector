@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRecorder } from '../src/recorder.js';
 import { mountInspector } from '../src/dom.js';
+import { instrumentTransport } from '../src/instrument.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -60,7 +62,7 @@ describe('mountInspector', () => {
     expect(host.querySelector('li')?.textContent).toContain('error');
   });
 
-  it('expands pretty-printed JSON using a native button and preserves expansion on updates', () => {
+  it('expands pretty-printed JSON using a native button and preserves expansion on updates', async () => {
     const { host, recorder } = fixture();
     const toggle = host.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
     const json = host.querySelector('pre')!;
@@ -72,6 +74,7 @@ describe('mountInspector', () => {
     expect(json.textContent).toContain('\n  "jsonrpc": "2.0"');
     expect(toggle.getAttribute('aria-controls')).toBe(json.id);
     recorder.record('out', { jsonrpc: '2.0', method: 'notifications/initialized' });
+    await Promise.resolve();
     expect(host.querySelector('pre')?.hidden).toBe(false);
     host.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click();
     expect(host.querySelector('pre')?.hidden).toBe(true);
@@ -103,20 +106,115 @@ describe('mountInspector', () => {
     vi.unstubAllGlobals();
   });
 
-  it('preserves keyboard focus while traffic arrives and flags tool result errors', () => {
+  it('preserves keyboard focus while traffic arrives and flags tool result errors', async () => {
     const { host, recorder } = fixture();
     const copy = host.querySelector<HTMLButtonElement>('button[data-action="copy"]')!;
     const seq = copy.closest('li')!.dataset.seq;
     copy.focus();
     recorder.record('in', { jsonrpc: '2.0', id: 5, result: { isError: true, content: [] } });
+    await Promise.resolve();
     expect(document.activeElement?.getAttribute('data-action')).toBe('copy');
     expect(document.activeElement?.closest('li')?.dataset.seq).toBe(seq);
     expect(host.querySelectorAll('.mcp-wire-inspector-error')).toHaveLength(2);
     const toggle = host.querySelector<HTMLButtonElement>('button[data-action="toggle"]')!;
     toggle.focus();
     recorder.record('out', { jsonrpc: '2.0', method: 'notifications/initialized' });
+    await Promise.resolve();
     expect(document.activeElement?.getAttribute('data-action')).toBe('toggle');
     expect(document.activeElement?.closest('li')?.dataset.seq).toBe(seq);
+  });
+
+  it('coalesces traffic bursts into one asynchronous render and keeps subscriptions synchronous', async () => {
+    const { recorder, host, panel } = fixture();
+    const entries = vi.spyOn(recorder, 'entries');
+    const listener = vi.fn();
+    const unsubscribe = recorder.subscribe(listener);
+    recorder.record('out', { jsonrpc: '2.0', id: 10, method: 'tools/list' });
+    recorder.record('in', { jsonrpc: '2.0', id: 10, result: { tools: [] } });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(entries).not.toHaveBeenCalled();
+    expect(host.querySelectorAll('li')).toHaveLength(6);
+    await Promise.resolve();
+    expect(entries).toHaveBeenCalledOnce();
+    expect(host.querySelectorAll('li')).toHaveLength(8);
+    recorder.clear();
+    expect(listener).toHaveBeenCalledTimes(3);
+    await Promise.resolve();
+    expect(host.querySelectorAll('li')).toHaveLength(0);
+    expect(host.textContent).toContain('Messages: 0');
+    unsubscribe();
+    panel.unmount();
+  });
+
+  it('sends before panel rendering so render time does not inflate synchronous round-trip latency', async () => {
+    let now = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const transport: Transport = {
+      async start() {}, async close() {},
+      send: vi.fn(async function (this: Transport, message) {
+        expect(now).toBe(1000);
+        if ('id' in message) this.onmessage?.({ jsonrpc: '2.0', id: message.id, result: {} });
+      }),
+    };
+    const { recorder, restore } = instrumentTransport(transport);
+    transport.onmessage = vi.fn();
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const panel = mountInspector(host, recorder);
+    const originalEntries = recorder.entries;
+    const entries = vi.spyOn(recorder, 'entries').mockImplementation(() => {
+      now += 100;
+      return originalEntries();
+    });
+    const sent = transport.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    expect(entries).not.toHaveBeenCalled();
+    expect(recorder.toJSON().map(entry => entry.latencyMs)).toEqual([0, 0]);
+    await sent;
+    expect(entries).toHaveBeenCalledOnce();
+    expect(host.querySelectorAll('li')).toHaveLength(2);
+    panel.unmount();
+    restore();
+  });
+
+  it('does not render a queued update after unmount', async () => {
+    const { recorder, host, panel } = fixture();
+    const entries = vi.spyOn(recorder, 'entries');
+    recorder.record('out', { jsonrpc: '2.0', method: 'notifications/initialized' });
+    panel.unmount();
+    await Promise.resolve();
+    expect(entries).not.toHaveBeenCalled();
+    expect(host.children).toHaveLength(0);
+  });
+
+  it('displays, copies and downloads redacted free text without changing traffic', async () => {
+    const { recorder, host, panel } = fixture();
+    const source = { jsonrpc: '2.0' as const, id: 99, result: {
+      content: [{ type: 'text', text: 'before Bearer fixture-sensitive-value after' }],
+    } };
+    recorder.record('in', source);
+    await Promise.resolve();
+    const row = host.querySelector('li[data-seq="7"]')!;
+    expect(row.querySelector('pre')?.textContent).toContain('before Bearer [REDACTED] after');
+    expect(host.textContent).not.toContain('fixture-sensitive-value');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(navigator, 'clipboard', 'get').mockReturnValue({ writeText } as unknown as Clipboard);
+    row.querySelector<HTMLButtonElement>('button[data-action="copy"]')!.click();
+    await Promise.resolve();
+    expect(JSON.parse(writeText.mock.calls[0]![0])).toEqual(recorder.toJSON()[6]);
+    expect(writeText.mock.calls[0]![0]).not.toContain('fixture-sensitive-value');
+    const createObjectURL = vi.fn((_: Blob) => 'blob:redacted');
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = vi.fn();
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    host.querySelector<HTMLButtonElement>('header button')!.click();
+    const blob = createObjectURL.mock.calls[0]![0] as Blob;
+    const download = await blob.text();
+    expect(JSON.parse(download)).toEqual(recorder.toJSON());
+    expect(download).not.toContain('fixture-sensitive-value');
+    expect(source.result.content[0]?.text).toBe('before Bearer fixture-sensitive-value after');
+    panel.unmount();
   });
 
   it('revokes outstanding download URLs on unmount', () => {
