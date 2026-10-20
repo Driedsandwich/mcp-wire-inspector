@@ -35,7 +35,7 @@ For the DOM entry point alone, use `import { mountInspector } from 'mcp-wire-ins
 
 ### `instrumentTransport(transport, options?)`
 
-Returns `{ recorder, restore }`. Instruments the supplied SDK `Transport` in place, including Streamable HTTP, SSE, stdio, and in-memory transports. Options are the same as `createRecorder`. Instrument **before** `client.connect(transport)` to capture the handshake. Outgoing messages are recorded before calling the original `send`; incoming messages before invoking the current `onmessage` callback.
+Returns `{ recorder, restore }`. Instruments the supplied SDK `Transport` in place. Tests cover Streamable HTTP and in-memory transports; other SDK transports, such as SSE and stdio, have not been individually tested. Options are the same as `createRecorder`. Instrument **before** `client.connect(transport)` to capture the handshake. Outgoing messages are recorded before calling the original `send`; incoming messages before invoking the current `onmessage` callback.
 
 The return value and errors of `send`, its options, callback arguments, and callback receiver are preserved. Assigning `onmessage` after instrumentation is supported, including SDK transports with forwarding accessors. `restore()` is idempotent: it restores the original `send` and property shape, retaining the latest receive callback so a connected client can continue. It does not close the connection or erase recorded messages. One active instrumentation per transport is supported. Hooks must be configurable; getter-only receive hooks are unsupported.
 
